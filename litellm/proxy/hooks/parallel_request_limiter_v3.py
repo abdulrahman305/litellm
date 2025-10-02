@@ -22,10 +22,10 @@ from typing import (
 
 from litellm import DualCache
 from litellm._logging import verbose_proxy_logger
-from litellm.exceptions import ParallelRequestLimitError
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.proxy._types import UserAPIKeyAuth
 from litellm.types.llms.openai import BaseLiteLLMOpenAIResponseObject
+from fastapi import HTTPException
 
 if TYPE_CHECKING:
     from opentelemetry.trace import Span as _Span
@@ -701,8 +701,9 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
                             f"Limit resets at: {reset_time_formatted}"
                         )
 
-                        raise ParallelRequestLimitError(
-                            message=detail,
+                        raise HTTPException(
+                            status_code=429,
+                            detail=detail,
                             headers={
                                 "retry-after": str(self.window_size),
                                 "rate_limit_type": str(status["rate_limit_type"]),
@@ -843,7 +844,7 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
             _get_parent_otel_span_from_kwargs,
         )
         from litellm.proxy.common_utils.callback_utils import (
-            get_metadata_variable_name_from_kwargs,
+            get_metadata_variable_name_from_litellm_params,
             get_model_group_from_litellm_kwargs,
         )
         from litellm.types.caching import RedisPipelineIncrementOperation
@@ -861,7 +862,7 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
 
             # Get metadata from kwargs
             litellm_metadata = kwargs["litellm_params"].get(
-                get_metadata_variable_name_from_kwargs(kwargs), {}
+                get_metadata_variable_name_from_litellm_params(kwargs["litellm_params"]), {}
             )
             if litellm_metadata is None:
                 return
