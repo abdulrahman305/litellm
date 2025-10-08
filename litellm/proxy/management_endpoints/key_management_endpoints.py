@@ -50,6 +50,7 @@ from litellm.proxy.management_endpoints.model_management_endpoints import (
 from litellm.proxy.management_helpers.object_permission_utils import (
     attach_object_permission_to_dict,
     handle_update_object_permission_common,
+    _set_object_permission,
 )
 from litellm.proxy.management_helpers.team_member_permission_checks import (
     TeamMemberPermissionChecks,
@@ -1114,36 +1115,6 @@ def prepare_metadata_fields(
     return non_default_values
 
 
-async def _set_object_permission(
-    data_json: dict,
-    prisma_client: Optional[PrismaClient],
-):
-    """
-    Creates the LiteLLM_ObjectPermissionTable record for the key.
-    - Handles permissions for vector stores and mcp servers.
-    """
-    if prisma_client is None:
-        return data_json
-
-    if "object_permission" in data_json:
-        # Serialize mcp_tool_permissions JSON field to avoid GraphQL parsing issues
-        # (e.g., server IDs starting with "3e64" being interpreted as floats)
-        if "mcp_tool_permissions" in data_json["object_permission"]:
-            data_json["object_permission"]["mcp_tool_permissions"] = safe_dumps(
-                data_json["object_permission"]["mcp_tool_permissions"]
-            )
-        
-        created_object_permission = (
-            await prisma_client.db.litellm_objectpermissiontable.create(
-                data=data_json["object_permission"],
-            )
-        )
-        data_json["object_permission_id"] = (
-            created_object_permission.object_permission_id
-        )
-        # delete the object_permission from the data_json
-        data_json.pop("object_permission")
-    return data_json
 
 
 async def prepare_key_update_data(
@@ -2833,6 +2804,79 @@ async def list_keys(
 
     except Exception as e:
         verbose_proxy_logger.exception(f"Error in list_keys: {e}")
+        if isinstance(e, HTTPException):
+            raise ProxyException(
+                message=getattr(e, "detail", f"error({str(e)})"),
+                type=ProxyErrorTypes.internal_server_error,
+                param=getattr(e, "param", "None"),
+                code=getattr(e, "status_code", status.HTTP_500_INTERNAL_SERVER_ERROR),
+            )
+        elif isinstance(e, ProxyException):
+            raise e
+        raise ProxyException(
+            message="Authentication Error, " + str(e),
+            type=ProxyErrorTypes.internal_server_error,
+            param=getattr(e, "param", "None"),
+            code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+@router.get(
+    "/key/aliases",
+    tags=["key management"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+@management_endpoint_wrapper
+async def key_aliases() -> Dict[str, List[str]]:
+    """
+    Lists all key aliases
+
+    Returns:
+        {
+            "aliases": List[str]
+        }
+    """
+    try:
+        from litellm.proxy.proxy_server import prisma_client
+
+        verbose_proxy_logger.debug("Entering key_aliases function")
+
+        if prisma_client is None:
+            verbose_proxy_logger.error("Database not connected")
+            raise Exception("Database not connected")
+
+        where: Dict[str, Any] = {}
+        try:
+            where.update(_get_condition_to_filter_out_ui_session_tokens())
+        except NameError:
+            # Helper may not exist in some builds; ignore if missing
+            pass
+
+        rows = await prisma_client.db.litellm_verificationtoken.find_many(
+            where=where,
+            order=[{"key_alias": "asc"}],
+        )
+
+        seen = set()
+        aliases: List[str] = []
+        for row in rows:
+            alias = getattr(row, "key_alias", None)
+            if alias is None and isinstance(row, dict):
+                alias = row.get("key_alias")
+
+            if not alias:
+                continue
+
+            alias_str = str(alias).strip()
+            if alias_str and alias_str not in seen:
+                seen.add(alias_str)
+                aliases.append(alias_str)
+
+        verbose_proxy_logger.debug(f"Returning {len(aliases)} key aliases")
+
+        return {"aliases": aliases}
+
+    except Exception as e:
+        verbose_proxy_logger.exception(f"Error in key_aliases: {e}")
         if isinstance(e, HTTPException):
             raise ProxyException(
                 message=getattr(e, "detail", f"error({str(e)})"),
