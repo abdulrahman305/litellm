@@ -28,6 +28,9 @@ from typing import (
 
 from litellm._uuid import uuid
 from litellm.constants import (
+    AIOHTTP_CONNECTOR_LIMIT,
+    AIOHTTP_KEEPALIVE_TIMEOUT,
+    AIOHTTP_TTL_DNS_CACHE,
     BASE_MCP_ROUTE,
     DEFAULT_MAX_RECURSE_DEPTH,
     DEFAULT_SLACK_ALERTING_THRESHOLD,
@@ -44,6 +47,7 @@ from litellm.types.utils import (
 from litellm.utils import load_credentials_from_list
 
 if TYPE_CHECKING:
+    from aiohttp import ClientSession
     from opentelemetry.trace import Span as _Span
 
     from litellm.integrations.opentelemetry import OpenTelemetry
@@ -559,7 +563,7 @@ async def proxy_shutdown_event():
 
 @asynccontextmanager
 async def proxy_startup_event(app: FastAPI):
-    global prisma_client, master_key, use_background_health_checks, llm_router, llm_model_list, general_settings, proxy_budget_rescheduler_min_time, proxy_budget_rescheduler_max_time, litellm_proxy_admin_name, db_writer_client, store_model_in_db, premium_user, _license_check, proxy_batch_polling_interval
+    global prisma_client, master_key, use_background_health_checks, llm_router, llm_model_list, general_settings, proxy_budget_rescheduler_min_time, proxy_budget_rescheduler_max_time, litellm_proxy_admin_name, db_writer_client, store_model_in_db, premium_user, _license_check, proxy_batch_polling_interval, shared_aiohttp_session
     import json
 
     init_verbose_loggers()
@@ -674,10 +678,38 @@ async def proxy_startup_event(app: FastAPI):
     ## [Optional] Initialize dd tracer
     ProxyStartupEvent._init_dd_tracer()
 
+    ## Initialize shared aiohttp session for connection reuse
+    try:
+        from aiohttp import ClientSession, TCPConnector
+        
+        # Create connector with connection pooling settings optimized for long-lived connections
+        connector = TCPConnector(
+            limit=AIOHTTP_CONNECTOR_LIMIT,
+            keepalive_timeout=AIOHTTP_KEEPALIVE_TIMEOUT,
+            ttl_dns_cache=AIOHTTP_TTL_DNS_CACHE,
+            enable_cleanup_closed=True,
+        )
+        
+        shared_aiohttp_session = ClientSession(connector=connector)
+        verbose_proxy_logger.info(
+            f"SESSION REUSE: Created shared aiohttp session for connection pooling (ID: {id(shared_aiohttp_session)})"
+        )
+    except Exception as e:
+        verbose_proxy_logger.warning(
+            f"Failed to create shared aiohttp session: {e}. Continuing without session reuse."
+        )
+
     # End of startup event
     yield
 
-    # Shutdown event
+    # Shutdown event - close shared aiohttp session
+    if shared_aiohttp_session is not None:
+        try:
+            await shared_aiohttp_session.close()
+            verbose_proxy_logger.info("SESSION REUSE: Closed shared aiohttp session")
+        except Exception as e:
+            verbose_proxy_logger.error(f"Error closing shared aiohttp session: {e}")
+    
     await proxy_shutdown_event()
 
 
@@ -955,6 +987,7 @@ worker_config = None
 master_key: Optional[str] = None
 otel_logging = False
 prisma_client: Optional[PrismaClient] = None
+shared_aiohttp_session: Optional["ClientSession"] = None  # Global shared session for connection reuse
 user_api_key_cache = DualCache(
     default_in_memory_ttl=UserAPIKeyCacheTTLEnum.in_memory_cache_ttl.value
 )
@@ -1883,7 +1916,9 @@ class ProxyConfig:
                 elif key == "priority_reservation_settings":
                     from litellm.types.utils import PriorityReservationSettings
 
-                    litellm.priority_reservation_settings = PriorityReservationSettings(**value)
+                    litellm.priority_reservation_settings = PriorityReservationSettings(
+                        **value
+                    )
                 elif key == "callbacks":
                     initialize_callbacks_on_proxy(
                         value=value,
@@ -2966,32 +3001,32 @@ class ProxyConfig:
     ) -> bool:
         """
         Check if an object type should be loaded from the database based on general_settings.supported_db_objects.
-        
+
         Args:
             object_type: Type of object to check (e.g., SupportedDBObjectType.MODELS, "models", etc.)
-        
+
         Returns:
             True if the object should be loaded, False otherwise
         """
         global general_settings
-        
+
         # Get the supported_db_objects configuration
         supported_db_objects = general_settings.get("supported_db_objects", None)
-        
+
         # If supported_db_objects is not set, load all objects (default behavior)
         if supported_db_objects is None:
             return True
-        
+
         # If supported_db_objects is set, only load specified objects
         if not isinstance(supported_db_objects, list):
             verbose_proxy_logger.warning(
                 f"supported_db_objects is not a list, got {type(supported_db_objects)}. Loading all objects."
             )
             return True
-        
+
         # Convert object_type to string for comparison (handles both str and enum)
         object_type_str = str(object_type)
-        
+
         # Check if the object type is in the list (supports both str and enum values)
         return any(str(obj) == object_type_str for obj in supported_db_objects)
 
@@ -3063,19 +3098,19 @@ class ProxyConfig:
         """
         if self._should_load_db_object(object_type="guardrails"):
             await self._init_guardrails_in_db(prisma_client=prisma_client)
-        
+
         if self._should_load_db_object(object_type="vector_stores"):
             await self._init_vector_stores_in_db(prisma_client=prisma_client)
-        
+
         if self._should_load_db_object(object_type="mcp"):
             await self._init_mcp_servers_in_db()
-        
+
         if self._should_load_db_object(object_type="pass_through_endpoints"):
             await self._init_pass_through_endpoints_in_db()
-        
+
         if self._should_load_db_object(object_type="prompts"):
             await self._init_prompts_in_db(prisma_client=prisma_client)
-        
+
         if self._should_load_db_object(object_type="model_cost_map"):
             await self._check_and_reload_model_cost_map(prisma_client=prisma_client)
 
@@ -9708,6 +9743,8 @@ async def dynamic_mcp_route(mcp_server_name: str, request: Request):
             media_type=headers_dict.get("content-type", "application/json"),
         )
 
+    except HTTPException as e:
+        raise e
     except Exception as e:
         verbose_proxy_logger.error(
             f"Error handling dynamic MCP route for {mcp_server_name}: {str(e)}"
