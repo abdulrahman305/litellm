@@ -347,6 +347,8 @@ const sidebars = {
           ]
         },
         "moderation",
+        "bedrock_invoke",
+        "bedrock_converse",
         "ocr",
         {
           type: "category",
@@ -537,6 +539,7 @@ const sidebars = {
         "providers/datarobot",
         "providers/ovhcloud",  
         "providers/wandb_inference",
+        "providers/cometapi",
       ],
     },
     {
