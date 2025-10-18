@@ -4994,6 +4994,8 @@ def _get_model_info_helper(  # noqa: PLR0915
                 ),
                 tpm=_model_info.get("tpm", None),
                 rpm=_model_info.get("rpm", None),
+                ocr_cost_per_page=_model_info.get("ocr_cost_per_page", None),
+                annotation_cost_per_page=_model_info.get("annotation_cost_per_page", None),
             )
     except Exception as e:
         verbose_logger.debug(f"Error getting model info: {e}")
@@ -7360,6 +7362,8 @@ class ProviderConfigManager:
             return VLLMModelInfo()
         elif LlmProviders.LEMONADE == provider:
             return litellm.LemonadeChatConfig()
+        elif LlmProviders.CLARIFAI == provider:
+            return litellm.ClarifaiConfig()
         return None
 
     @staticmethod
