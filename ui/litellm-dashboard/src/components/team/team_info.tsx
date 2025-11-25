@@ -25,7 +25,7 @@ import {
   teamUpdateCall,
   getGuardrailsList,
 } from "@/components/networking";
-import { Button, Form, Input, Select, message, Tooltip } from "antd";
+import { Button, Form, Input, Select, Switch, message, Tooltip } from "antd";
 import { InfoCircleOutlined } from "@ant-design/icons";
 import { ArrowLeftIcon } from "@heroicons/react/outline";
 import MemberModal from "./edit_membership";
@@ -44,6 +44,7 @@ import { copyToClipboard as utilCopyToClipboard } from "../../utils/dataUtils";
 import NotificationsManager from "../molecules/notifications_manager";
 import PassThroughRoutesSelector from "../common_components/PassThroughRoutesSelector";
 import { mapEmptyStringToNull } from "@/utils/keyUpdateUtils";
+import DeleteResourceModal from "../common_components/DeleteResourceModal";
 
 export interface TeamMembership {
   user_id: string;
@@ -138,6 +139,9 @@ const TeamInfoView: React.FC<TeamInfoProps> = ({
   const [mcpAccessGroupsLoaded, setMcpAccessGroupsLoaded] = useState(false);
   const [copiedStates, setCopiedStates] = useState<Record<string, boolean>>({});
   const [guardrailsList, setGuardrailsList] = useState<string[]>([]);
+  const [memberToDelete, setMemberToDelete] = useState<Member | null>(null);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   console.log("userModels in team info", userModels);
 
@@ -268,13 +272,17 @@ const TeamInfoView: React.FC<TeamInfoProps> = ({
     }
   };
 
-  const handleMemberDelete = async (member: Member) => {
-    try {
-      if (accessToken == null) {
-        return;
-      }
+  const handleMemberDelete = (member: Member) => {
+    setMemberToDelete(member);
+    setIsDeleteModalOpen(true);
+  };
 
-      await teamMemberDeleteCall(accessToken, teamId, member);
+  const handleDeleteConfirm = async () => {
+    if (!memberToDelete || !accessToken) return;
+
+    setIsDeleting(true);
+    try {
+      await teamMemberDeleteCall(accessToken, teamId, memberToDelete);
 
       NotificationsManager.success("Team member removed successfully");
 
@@ -287,7 +295,16 @@ const TeamInfoView: React.FC<TeamInfoProps> = ({
     } catch (error) {
       NotificationsManager.fromBackend("Failed to remove team member");
       console.error("Error removing team member:", error);
+    } finally {
+      setIsDeleting(false);
+      setIsDeleteModalOpen(false);
+      setMemberToDelete(null);
     }
+  };
+
+  const handleDeleteCancel = () => {
+    setIsDeleteModalOpen(false);
+    setMemberToDelete(null);
   };
 
   const handleTeamUpdate = async (values: any) => {
@@ -345,23 +362,20 @@ const TeamInfoView: React.FC<TeamInfoProps> = ({
         servers: [],
         accessGroups: [],
       };
-      const mcpToolPermissions = values.mcp_tool_permissions || {};
+      const serverIds = new Set(servers || []);
+      const mcpToolPermissions = Object.fromEntries(
+        Object.entries(values.mcp_tool_permissions || {}).filter(([serverId]) => serverIds.has(serverId)),
+      );
 
-      if (
-        (servers && servers.length > 0) ||
-        (accessGroups && accessGroups.length > 0) ||
-        Object.keys(mcpToolPermissions).length > 0
-      ) {
-        updateData.object_permission = {};
-        if (servers && servers.length > 0) {
-          updateData.object_permission.mcp_servers = servers;
-        }
-        if (accessGroups && accessGroups.length > 0) {
-          updateData.object_permission.mcp_access_groups = accessGroups;
-        }
-        if (Object.keys(mcpToolPermissions).length > 0) {
-          updateData.object_permission.mcp_tool_permissions = mcpToolPermissions;
-        }
+      updateData.object_permission = {};
+      if (servers) {
+        updateData.object_permission.mcp_servers = servers;
+      }
+      if (accessGroups) {
+        updateData.object_permission.mcp_access_groups = accessGroups;
+      }
+      if (mcpToolPermissions) {
+        updateData.object_permission.mcp_tool_permissions = mcpToolPermissions;
       }
       delete values.mcp_servers_and_groups;
       delete values.mcp_tool_permissions;
@@ -547,6 +561,7 @@ const TeamInfoView: React.FC<TeamInfoProps> = ({
                     team_member_tpm_limit: info.team_member_budget_table?.tpm_limit,
                     team_member_rpm_limit: info.team_member_budget_table?.rpm_limit,
                     guardrails: info.metadata?.guardrails || [],
+                    disable_global_guardrails: info.metadata?.disable_global_guardrails || false,
                     metadata: info.metadata
                       ? JSON.stringify((({ logging, ...rest }) => rest)(info.metadata), null, 2)
                       : "",
@@ -575,6 +590,9 @@ const TeamInfoView: React.FC<TeamInfoProps> = ({
                     <Select mode="multiple" placeholder="Select models">
                       <Select.Option key="all-proxy-models" value="all-proxy-models">
                         All Proxy Models
+                      </Select.Option>
+                      <Select.Option key="no-default-models" value="no-default-models">
+                        No Default Models
                       </Select.Option>
                       {Array.from(new Set(userModels)).map((model, idx) => (
                         <Select.Option key={idx} value={model}>
@@ -662,6 +680,22 @@ const TeamInfoView: React.FC<TeamInfoProps> = ({
                     />
                   </Form.Item>
 
+                  <Form.Item
+                    label={
+                      <span>
+                        Disable Global Guardrails{" "}
+                        <Tooltip title="When enabled, this team will bypass any guardrails configured to run on every request (global guardrails)">
+                          <InfoCircleOutlined style={{ marginLeft: "4px" }} />
+                        </Tooltip>
+                      </span>
+                    }
+                    name="disable_global_guardrails"
+                    valuePropName="checked"
+                    help="Bypass global guardrails for this team"
+                  >
+                    <Switch checkedChildren="Yes" unCheckedChildren="No" />
+                  </Form.Item>
+
                   <Form.Item label="Vector Stores" name="vector_stores">
                     <VectorStoreSelector
                       onChange={(values: string[]) => form.setFieldValue("vector_stores", values)}
@@ -730,9 +764,9 @@ const TeamInfoView: React.FC<TeamInfoProps> = ({
 
                   <div className="sticky z-10 bg-white p-4 border-t border-gray-200 bottom-[-1.5rem] inset-x-[-1.5rem]">
                     <div className="flex justify-end items-center gap-2">
-                      <Button htmlType="button" onClick={() => setIsEditing(false)}>
+                      <TremorButton variant="secondary" onClick={() => setIsEditing(false)}>
                         Cancel
-                      </Button>
+                      </TremorButton>
                       <TremorButton type="submit">Save Changes</TremorButton>
                     </div>
                   </div>
@@ -793,6 +827,17 @@ const TeamInfoView: React.FC<TeamInfoProps> = ({
                   <div>
                     <Text className="font-medium">Status</Text>
                     <Badge color={info.blocked ? "red" : "green"}>{info.blocked ? "Blocked" : "Active"}</Badge>
+                  </div>
+
+                  <div>
+                    <Text className="font-medium">Disable Global Guardrails</Text>
+                    <div>
+                      {info.metadata?.disable_global_guardrails === true ? (
+                        <Badge color="yellow">Enabled - Global guardrails bypassed</Badge>
+                      ) : (
+                        <Badge color="green">Disabled - Global guardrails active</Badge>
+                      )}
+                    </div>
                   </div>
 
                   <ObjectPermissionsView
@@ -884,6 +929,23 @@ const TeamInfoView: React.FC<TeamInfoProps> = ({
         onCancel={() => setIsAddMemberModalVisible(false)}
         onSubmit={handleMemberCreate}
         accessToken={accessToken}
+      />
+
+      {/* Delete Member Confirmation Modal */}
+      <DeleteResourceModal
+        isOpen={isDeleteModalOpen}
+        title="Delete Team Member"
+        alertMessage="Removing team members will also delete any keys created by or created for this member."
+        message="Are you sure you want to remove this member from the team? This action cannot be undone."
+        resourceInformationTitle="Team Member Information"
+        resourceInformation={[
+          { label: "User ID", value: memberToDelete?.user_id, code: true },
+          { label: "Email", value: memberToDelete?.user_email },
+          { label: "Role", value: memberToDelete?.role },
+        ]}
+        onCancel={handleDeleteCancel}
+        onOk={handleDeleteConfirm}
+        confirmLoading={isDeleting}
       />
     </div>
   );
